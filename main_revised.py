@@ -3,6 +3,8 @@ import os
 import numpy as np
 import time
 import cv2
+import matplotlib.pyplot as plt
+import shutil
 
 import torch
 import torch.nn as nn
@@ -19,21 +21,17 @@ from dataset import *
 from model import *
 from utils import *
 
-pwd = os.getcwd()
-
 parser = argparse.ArgumentParser()
 parser.add_argument('--test', action='store_true')
-parser.add_argument('--valid', default='every_epoch') # 'every_epoch', 'last_only'
 args = parser.parse_args()
 #please google how to use argparse
 #a short intro:
 #to train: python main.py
 #to test:  python main.py --test
 
-
 class_num = 4 #cat dog person background
 
-num_epochs = 100
+num_epochs = 300
 batch_size = 16
 
 
@@ -48,16 +46,33 @@ network.to(device)
 
 cudnn.benchmark = True
 
-thresholds = np.arange(start=0, stop=1, step=0.05)
-param_mAP = 0
 mAP_best = 0
 
 
+# split dataset into train/val
+dataset_dir = "./data/train/"            #write the path to the directory of whole dataset(...../train/)
+train_dir = "./train_set/"               #write a new data path in front of /train_set/,
+val_dir = "./val_set/"                   # split_dataset function automatically makes a new folder
+split_ratio = 0.9
+
+split_dataset(dataset_dir, train_dir, val_dir, split_ratio)
+
+# make a directory that saves precision recall curve
+plt_dir = './precision_recall_curve/'
+if os.path.exists(plt_dir):
+    print(f"{plt_dir} exists, removing...")
+    shutil.rmtree(plt_dir, ignore_errors=True)
+
+os.makedirs(plt_dir, exist_ok=True)
+
+
 if not args.test:
-    imgs_dir = os.path.join(pwd,'data','train','images','')
-    annot_dir = os.path.join(pwd, 'data', 'train', 'annotations','')
+    imgs_dir = train_dir + 'images/'
+    annot_dir = train_dir + 'annotations/'
+    imgs_val_dir = val_dir + 'images/'
+    annot_val_dir = val_dir + 'annotations/'
     dataset = COCO(imgs_dir, annot_dir, class_num, boxs_default, train=True, image_size=320)
-    dataset_val = COCO(imgs_dir, annot_dir, class_num, boxs_default, train=False, image_size=320)
+    dataset_val = COCO(imgs_val_dir, annot_val_dir, class_num, boxs_default, train=False, image_size=320)
 
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)          #shuffle -> True!!
     # dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=0)
@@ -103,80 +118,98 @@ if not args.test:
         #visualize
         pred_confidence_ = pred_confidence[0].detach().cpu().numpy()
         pred_box_ = pred_box[0].detach().cpu().numpy()
-        visualize_pred("result/train_raw_" + str(epoch), pred_confidence_, pred_box_, ann_confidence_[0].numpy(), ann_box_[0].numpy(), images_[0].numpy(), boxs_default)
+        visualize_pred("train_raw_" + str(epoch), pred_confidence_, pred_box_, ann_confidence_[0].numpy(), ann_box_[0].numpy(), images_[0].numpy(), boxs_default)
         pred_confidence_, pred_box_ = non_maximum_suppression(pred_confidence_, pred_box_, boxs_default, overlap=0.35, threshold=0.5)
-        visualize_pred("result/train_nms_" + str(epoch), pred_confidence_, pred_box_, ann_confidence_[0].numpy(), ann_box_[0].numpy(), images_[0].numpy(), boxs_default)
+        visualize_pred("train_nms_" + str(epoch), pred_confidence_, pred_box_, ann_confidence_[0].numpy(), ann_box_[0].numpy(), images_[0].numpy(), boxs_default)
 
         # break               #Erase later!!!!!!!!!
         
-        if (args.valid == 'every_epoch')|((args.valid=='last_only')&(epoch+1==num_epochs)):
-            #VALIDATION
-            network.eval()
-            # TODO: split the dataset into 90% training and 10% validation
-            # use the training set to train and the validation set to evaluate
-            metrics_class_all = np.zeros((3,3,len(thresholds)))
-            with torch.no_grad():
-                for i, data in enumerate(dataloader_val, 0):
-                    if (i%100)==0: print('validation_'+str(i)+'/'+str(len(dataloader_val)))
-                    images_, ann_box_, ann_confidence_, width, height = data
-                    images = images_.cuda()
-                    ann_box = ann_box_.cuda()
-                    ann_confidence = ann_confidence_.cuda()
+        #VALIDATION
+        network.eval()
         
-                    pred_confidence, pred_box = network(images)
-                    
-                    pred_box_ = pred_box.detach().cpu().numpy()
-                    
-                    ann_cf = ann_confidence.detach().cpu().numpy()
-                    pred_cf = pred_confidence.detach().cpu().numpy()
-                    
-                    for tri in range(0, len(thresholds)):
-                        # metrics_class = get_TPFPFN(ann_cf, pred_cf, 0.0)
-                        metrics_class = get_TPFPFN(ann_cf, pred_cf, thresholds[tri])
-                        metrics_class_all[:,:,tri] += metrics_class
-                    #optional: implement a function to accumulate precision and recall to compute mAP or F1.
-                    #update_precision_recall(pred_confidence_, pred_box_, ann_confidence_.numpy(), ann_box_.numpy(), boxs_default,precision_,recall_,thres)
-            
-            precision = np.zeros((3, len(thresholds)))
-            recall = np.zeros((3, len(thresholds)))
-            for ci in range(0,3):
-                for tri in range(0,len(thresholds)):
-                    (precision[ci,tri], recall[ci,tri]) = get_precision_recall(TP=metrics_class_all[0,ci,tri], FP=metrics_class_all[1,ci,tri], FN=metrics_class_all[2,ci,tri])
-            
-            param_AP = np.zeros((3,1))
-            for ci in range(0,3):
-                save_path = f"result/epoch_{epoch}_"
-                param_AP[ci,0] = plot_PRcurve(precision[ci,:], recall[ci,:], ci, save_path)
-            param_mAP = np.mean(param_AP)
-            print(f"mAP: {param_mAP:.2f}")
+        # TODO: split the dataset into 90% training and 10% validation
+        # use the training set to train and the validation set to evaluate
         
-            #visualize
-            pred_confidence_ = pred_confidence[0].detach().cpu().numpy()
-            pred_box_ = pred_box[0].detach().cpu().numpy()
-            pred_confidence_, pred_box_ = non_maximum_suppression(pred_confidence_, pred_box_, boxs_default, overlap=0.35, threshold=0.5)
-            visualize_pred("result/val_" + str(epoch), pred_confidence_, pred_box_, ann_confidence_[0].numpy(), ann_box_[0].numpy(), images_[0].numpy(), boxs_default)
+        thresholds = np.arange(start=0, stop=0.95, step=0.05)
 
+        ann_conf_dict = {0: [], 1: [], 2: []}
+        pred_conf_dict = {0: [], 1: [], 2: []}
+
+        for i, data in enumerate(dataloader_val, 0):
+            images_, ann_box_, ann_confidence_, width, height = data
+            images = images_.cuda()
+            ann_box = ann_box_.cuda()
+            ann_confidence = ann_confidence_.cuda()
+
+            pred_confidence, pred_box = network(images)
+            
+            pred_confidence_ = pred_confidence.detach().cpu().numpy()
+            pred_box_ = pred_box.detach().cpu().numpy()
+            
+            #optional: implement a function to accumulate precision and recall to compute mAP or F1.
+            #update_precision_recall(pred_confidence_, pred_box_, ann_confidence_.numpy(), ann_box_.numpy(), boxs_default,precision_,recall_,thres)
+            # generate_mAP(ann_confidence_[0].numpy(), pred_confidence_[0], precisions, recalls, APs)
+            ann_confidence = ann_confidence_.numpy()
+
+            for (pred_data, ann_data) in zip(pred_confidence_, ann_confidence):
+                label_pos = np.argwhere(ann_data[:, :-1] == 1)  # finding the indices of labels
+                ann_num = label_pos.shape[0]  # finding the number of labels
+                c = label_pos[0, 1]  # finding which class it is
+
+                ann_conf = ann_data[:, c]
+                for element in ann_conf:
+                    ann_conf_dict[c].append(int(element))
+                
+                pred_conf = pred_data[:, c]
+                for element in pred_conf:
+                    pred_conf_dict[c].append(element)
+
+
+        #visualize
+        pred_confidence_ = pred_confidence[0].detach().cpu().numpy()
+        pred_box_ = pred_box[0].detach().cpu().numpy()
+        pred_confidence_, pred_box_ = non_maximum_suppression(pred_confidence_, pred_box_, boxs_default, overlap=0.35, threshold=0.5)
+        visualize_pred("val_" + str(epoch), pred_confidence_, pred_box_, ann_confidence_[0].numpy(), ann_box_[0].numpy(), images_[0].numpy(), boxs_default)
+        
+        mAP = generate_mAP(ann_conf_dict, pred_conf_dict, thresholds, epoch)
+        print(f"mAP: {mAP:.3f}")
+        
+        #optional: compute F1
+        #F1score = 2*precision*recall/np.maximum(precision+recall,1e-8)
+        #print(F1score)
+        
         #save weights
         # save weights in every epoch
         torch.save(network.state_dict(), 'network.pth')
-        
-        if param_mAP > mAP_best:
+
+        if mAP >= mAP_best:
             print('New record! Updating network_best...')
             torch.save(network.state_dict(), 'network_best.pth')
-            mAP_best = param_mAP
+            mAP_best = mAP
+
 
 else:
     #TEST
-    test_imgs_dir = os.path.join(pwd,'data','train','images','')
-    test_annot_dir = os.path.join(pwd,'data','train','annotations','')
+    test_imgs_dir = val_dir + 'images'
+    test_annot_dir = val_dir + 'annotations'
     dataset_test = COCO(test_imgs_dir, test_annot_dir, class_num, boxs_default, train = False, image_size=320)
     dataloader_test = torch.utils.data.DataLoader(dataset_test, batch_size=1, shuffle=False, num_workers=0)
     network.load_state_dict(torch.load('network.pth'))
     network.eval()
+
+    txt_dir = './result/'
+    if os.path.exists(txt_dir):
+        print(f"{txt_dir} exists, removing...")
+        shutil.rmtree(txt_dir, ignore_errors=True)
+
+    os.makedirs(txt_dir, exist_ok=True)
+
+    thresholds = np.arange(start=0, stop=0.95, step=0.05)
+
+    ann_conf_dict = {0: [], 1: [], 2: []}
+    pred_conf_dict = {0: [], 1: [], 2: []}
     
-    metrics_class_all = np.zeros((3,3,len(thresholds)))
     for i, data in enumerate(dataloader_test, 0):
-        if i > 100: break
         images_, ann_box_, ann_confidence_, width, height = data
         images = images_.cuda()
         ann_box = ann_box_.cuda()
@@ -188,19 +221,26 @@ else:
         pred_box_ = pred_box[0].detach().cpu().numpy()
 
         pred_confidence_,pred_box_ = non_maximum_suppression(pred_confidence_,pred_box_,boxs_default)
-        
-        ann_cf = ann_confidence.detach().cpu().numpy()
-        pred_cf = pred_confidence.detach().cpu().numpy()
-        
-        for tri in range(0, len(thresholds)):
-            # metrics_class = get_TPFPFN(ann_cf, pred_cf, 0.0)
-            metrics_class = get_TPFPFN(ann_cf, pred_cf, thresholds[tri])
-            metrics_class_all[:,:,tri] += metrics_class
+
+        ann_confidence = ann_confidence_.numpy()
+
+        for (pred_data, ann_data) in zip(pred_confidence_, ann_confidence):
+            label_pos = np.argwhere(ann_data[:, :-1] == 1)  # finding the indices of labels
+            ann_num = label_pos.shape[0]  # finding the number of labels
+            c = label_pos[0, 1]  # finding which class it is
+
+            ann_conf = ann_data[:, c]
+            for element in ann_conf:
+                ann_conf_dict[c].append(int(element))
+            
+            pred_conf = pred_data[:, c]
+            for element in pred_conf:
+                pred_conf_dict[c].append(element)
         
         #TODO: save predicted bounding boxes and classes to a txt file.
         #you will need to submit those files for grading this assignment
 
-        txt_dir = pwd + "\\result\\"                    #write your own directory where you will save your test results
+        txt_dir = "./result/"                    #write your own directory where you will save your test results
         filename = f'test_{str(i).zfill(5)}.txt'
 
         width = int(width)
@@ -233,20 +273,10 @@ else:
                     file.write(" ")
                 file.write('\n')
 
+        
+        mAP = generate_mAP(ann_confidence_[0].numpy(), pred_confidence_, thresholds)
+        print(f"mAP: {mAP:.3f}")
 
-        # visualize_pred(f"result/test_{i}", pred_confidence_, pred_box_, ann_confidence_[0].numpy(), ann_box_[0].numpy(), images_[0].numpy(), boxs_default)
+        visualize_pred(f"test_{i}", pred_confidence_, pred_box_, ann_confidence_[0].numpy(), ann_box_[0].numpy(), images_[0].numpy(), boxs_default)
         # print(f"saving test_{i}...")
-        # cv2.waitKey(1000)
-    
-    precision = np.zeros((3, len(thresholds)))
-    recall = np.zeros((3, len(thresholds)))
-    for ci in range(0,3):
-        for tri in range(0,len(thresholds)):
-            (precision[ci,tri], recall[ci,tri]) = get_precision_recall(TP=metrics_class_all[0,ci,tri], FP=metrics_class_all[1,ci,tri], FN=metrics_class_all[2,ci,tri])
-    
-    param_AP = np.zeros((3,1))
-    for ci in range(0,3):
-        save_path = f"result/test_"
-        param_AP[ci,0] = plot_PRcurve(precision[ci,:], recall[ci,:], ci, save_path)
-    param_mAP = np.mean(param_AP)
-    print(f"mAP: {param_mAP:.2f}")
+        cv2.waitKey(1000)
